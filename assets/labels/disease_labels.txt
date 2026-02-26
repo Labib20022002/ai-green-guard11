@@ -1,0 +1,19 @@
+Cauliflower_Downy Mildew Leaf Spot
+Cauliflower_Healthy
+Eggplant_Cercospora leaf spot
+Eggplant_Healthy
+Eggplant_Leaf Miner Damage
+Grape_Anthracnose
+Grape_Black rot
+Grape_Healthy
+Guava_Anthracnose
+Guava_Healthy
+Lemon_Citrus Black Spot
+Lemon_Citrus Leafminer
+Lemon_Healthy leaf
+Lemon_Nutrient Deficiency
+Rose_Anthracnose
+Rose_Black Spot
+Rose_Healthy
+Tomato_Early Blight
+Tomato_Healthy
