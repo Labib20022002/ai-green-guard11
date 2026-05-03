@@ -1,9 +1,7 @@
-import 'dart:io';
-import 'dart:typed_data';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:tflite_flutter/tflite_flutter.dart';
-import 'package:image/image.dart' as img;
+import 'package:http/http.dart' as http;
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -13,176 +11,303 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  Interpreter? _leafInterpreter;
-  Interpreter? _diseaseInterpreter;
 
-  List<String> leafLabels = [];
-  List<String> diseaseLabels = [];
+  XFile? _image;
 
-  File? _image;
   String _result = '';
+
   bool _loading = false;
 
-  static const int imgSize = 224;
+  // ==========================================
+  // IMAGE PICKER
+  // ==========================================
 
-  // Thresholds
-  static const double leafThreshold = 0.80;
-  static const double diseaseThreshold = 0.60;
+  Future<void> _pickImage(
+      ImageSource source) async {
 
-  @override
-  void initState() {
-    super.initState();
-    _loadModels();
-    _loadLabels();
-  }
-
-  // ================= LOAD MODELS =================
-  Future<void> _loadModels() async {
-    _leafInterpreter =
-        await Interpreter.fromAsset('assets/model/leaf_detector.tflite');
-    _diseaseInterpreter =
-        await Interpreter.fromAsset('assets/model/mobilenetv2.tflite');
-  }
-
-  // ================= LOAD LABELS =================
-  Future<void> _loadLabels() async {
-    leafLabels = (await DefaultAssetBundle.of(context)
-            .loadString('assets/labels/leaf_labels.txt'))
-        .split('\n');
-
-    diseaseLabels = (await DefaultAssetBundle.of(context)
-            .loadString('assets/labels/disease_labels.txt'))
-        .split('\n');
-  }
-
-  // ================= IMAGE PICKER =================
-  Future<void> _pickImage(ImageSource source) async {
     final picker = ImagePicker();
-    final picked = await picker.pickImage(source: source);
+
+    final picked =
+        await picker.pickImage(
+      source: source,
+    );
+
     if (picked == null) return;
 
     setState(() {
-      _image = File(picked.path);
+
+      _image = picked;
+
       _result = '';
+
     });
 
-    await _runPipeline();
+    await predictDisease(picked);
   }
 
-  // ================= PREPROCESS =================
-  Float32List preprocess(img.Image image) {
-    final Float32List input = Float32List(imgSize * imgSize * 3);
-    int index = 0;
+  // ==========================================
+  // SEND IMAGE TO FLASK BACKEND
+  // ==========================================
 
-    for (int y = 0; y < imgSize; y++) {
-      for (int x = 0; x < imgSize; x++) {
-        final pixel = image.getPixel(x, y);
-        input[index++] = pixel.r / 127.5 - 1.0;
-        input[index++] = pixel.g / 127.5 - 1.0;
-        input[index++] = pixel.b / 127.5 - 1.0;
+  Future<void> predictDisease(
+      XFile imageFile) async {
+
+    setState(() {
+
+      _loading = true;
+
+    });
+
+    try {
+
+      // ==========================================
+      // BACKEND URL
+      // ==========================================
+
+      var request = http.MultipartRequest(
+
+        'POST',
+
+        Uri.parse(
+          'http://127.0.0.1:5000/predict',
+        ),
+
+      );
+
+      // ==========================================
+      // READ IMAGE BYTES
+      // ==========================================
+
+      var bytes =
+          await imageFile.readAsBytes();
+
+      // ==========================================
+      // CREATE MULTIPART FILE
+      // ==========================================
+
+      var multipartFile =
+          http.MultipartFile.fromBytes(
+
+        'file',
+
+        bytes,
+
+        filename: imageFile.name,
+
+      );
+
+      request.files.add(multipartFile);
+
+      // ==========================================
+      // SEND REQUEST
+      // ==========================================
+
+      var response =
+          await request.send();
+
+      // ==========================================
+      // GET RESPONSE
+      // ==========================================
+
+      var responseString =
+          await response.stream
+              .bytesToString();
+
+      var jsonData =
+          jsonDecode(responseString);
+
+      print(jsonData);
+
+      // ==========================================
+      // SUCCESS
+      // ==========================================
+
+      if (jsonData['success'] == true) {
+
+        setState(() {
+
+          _result =
+              '${jsonData['disease']} '
+              '(${jsonData['confidence']}%)';
+
+        });
+
       }
-    }
-    return input;
-  }
 
-  // ================= RUN PIPELINE =================
-  Future<void> _runPipeline() async {
-    if (_image == null) return;
-    setState(() => _loading = true);
+      // ==========================================
+      // ERROR
+      // ==========================================
 
-    final imageBytes = await _image!.readAsBytes();
-    final image = img.decodeImage(imageBytes);
-    if (image == null) return;
+      else {
 
-    final resized =
-        img.copyResize(image, width: imgSize, height: imgSize);
+        setState(() {
 
-    final input =
-        preprocess(resized).reshape([1, imgSize, imgSize, 3]);
+          _result =
+              jsonData['error'];
 
-    // ---------- STAGE 1: LEAF DETECTOR ----------
-    final leafOutput = List.generate(1, (_) => List.filled(2, 0.0));
-    _leafInterpreter!.run(input, leafOutput);
+        });
 
-    final leafConfidence = leafOutput[0][0]; // leaf index = 0
+      }
 
-    if (leafConfidence < leafThreshold) {
+    } catch (e) {
+
       setState(() {
-        _result = '❌ Not a leaf image\nPlease capture a clear leaf photo.';
-        _loading = false;
+
+        _result = 'Error: $e';
+
       });
-      return;
+
     }
 
-    // ---------- STAGE 2: DISEASE CLASSIFIER ----------
-    final diseaseOutput =
-        List.generate(1, (_) => List.filled(diseaseLabels.length, 0.0));
-    _diseaseInterpreter!.run(input, diseaseOutput);
+    setState(() {
 
-    int bestIndex = 0;
-    double bestScore = 0;
+      _loading = false;
 
-    for (int i = 0; i < diseaseLabels.length; i++) {
-      if (diseaseOutput[0][i] > bestScore) {
-        bestScore = diseaseOutput[0][i];
-        bestIndex = i;
-      }
-    }
-
-    if (bestScore < diseaseThreshold) {
-      _result = '⚠ Uncertain disease\nTry another image';
-    } else {
-      _result =
-          '${diseaseLabels[bestIndex]} (${(bestScore * 100).toStringAsFixed(2)}%)';
-    }
-
-    setState(() => _loading = false);
+    });
   }
 
-  // ================= UI =================
+  // ==========================================
+  // UI
+  // ==========================================
+
   @override
   Widget build(BuildContext context) {
+
     return Scaffold(
-      appBar: AppBar(title: const Text('AI-GreenGuard')),
+
+      appBar: AppBar(
+
+        title: const Text(
+          'AI-GreenGuard',
+        ),
+
+      ),
+
       body: Padding(
-        padding: const EdgeInsets.all(16),
+
+        padding:
+            const EdgeInsets.all(16),
+
         child: Column(
+
           children: [
+
+            // ==========================================
+            // IMAGE DISPLAY
+            // ==========================================
+
             _image != null
-                ? Image.file(_image!, height: 250)
-                : const Icon(Icons.eco, size: 200),
+
+                ? Image.network(
+
+                    _image!.path,
+
+                    height: 250,
+
+                  )
+
+                : const Icon(
+
+                    Icons.eco,
+
+                    size: 200,
+
+                  ),
 
             const SizedBox(height: 20),
 
+            // ==========================================
+            // RESULT
+            // ==========================================
+
             _loading
+
                 ? const CircularProgressIndicator()
+
                 : Text(
+
                     _result,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(
-                        fontSize: 18, fontWeight: FontWeight.bold),
+
+                    textAlign:
+                        TextAlign.center,
+
+                    style:
+                        const TextStyle(
+
+                      fontSize: 18,
+
+                      fontWeight:
+                          FontWeight.bold,
+
+                    ),
+
                   ),
 
             const SizedBox(height: 30),
 
+            // ==========================================
+            // BUTTONS
+            // ==========================================
+
             Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+
+              mainAxisAlignment:
+                  MainAxisAlignment
+                      .spaceEvenly,
+
               children: [
+
                 ElevatedButton.icon(
-                  icon: const Icon(Icons.photo),
-                  label: const Text("Gallery"),
-                  onPressed: () => _pickImage(ImageSource.gallery),
+
+                  icon: const Icon(
+                    Icons.photo,
+                  ),
+
+                  label: const Text(
+                    "Gallery",
+                  ),
+
+                  onPressed: () {
+
+                    _pickImage(
+                      ImageSource.gallery,
+                    );
+
+                  },
+
                 ),
+
                 ElevatedButton.icon(
-                  icon: const Icon(Icons.camera),
-                  label: const Text("Camera"),
-                  onPressed: () => _pickImage(ImageSource.camera),
+
+                  icon: const Icon(
+                    Icons.camera,
+                  ),
+
+                  label: const Text(
+                    "Camera",
+                  ),
+
+                  onPressed: () {
+
+                    _pickImage(
+                      ImageSource.camera,
+                    );
+
+                  },
+
                 ),
+
               ],
+
             ),
+
           ],
+
         ),
+
       ),
+
     );
   }
 }
+
